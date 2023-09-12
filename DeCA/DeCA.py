@@ -799,7 +799,7 @@ class DeCALogic(ScriptedLoadableModuleLogic):
             slicer.mrmlScene.RemoveNode(rigidTransformNode)
             slicer.mrmlScene.RemoveNode(mirrorLMNode)
 
-  def runDCAlign(self, baseMeshPath, baseLMPath, meshDirectory, landmarkDirectory, outputDirectory, optionCPD, optionErrorOutput):
+  def runDCAlign(self, baseMeshPath, baseLMPath, meshDirectory, landmarkDirectory, outputDirectory, optionCPD, optionErrorOutput, transformListGlobal):
     if optionErrorOutput:
       self.errorCheckPath = os.path.join(outputDirectory, "errorChecking")
       if not os.path.exists(self.errorCheckPath):
@@ -816,6 +816,25 @@ class DeCALogic(ScriptedLoadableModuleLogic):
       denseCorrespondenceGroup = self.denseCorrespondenceBaseMesh(landmarks, models, baseMesh, baseLandmarks)
     else:
       denseCorrespondenceGroup = self.denseCorrespondenceCPD(landmarks, models, baseMesh, baseLandmarks)
+
+
+  
+     ### EVA ADJUSTMENTS - TRY REVERTING TO GLOBAL POSITION
+    
+    # get all DeCa outputs
+    sampleNumber = denseCorrespondenceGroup.GetNumberOfBlocks()
+    for i in range(sampleNumber):
+      alignedMesh = denseCorrespondenceGroup.GetBlock(i)
+      #apply inverse transforms
+      #TODO: need to somehow save inverse transforms from runAlign function to list or files, then read, and match with correct meshes
+      # going by index might not work, not sure if order in group is same as initial order before aligning 
+      transformToGlobal = transformListGlobal(i)
+
+       #does this automatically update the meshes in denseCorrespondenceGroup?
+       # it needs to do so so that analysis step is done on updated meshes
+      alignedMesh.setTransform(transformToGlobal)
+
+    ###
 
     self.addMagnitudeFeature(denseCorrespondenceGroup, self.modelNames, baseMesh)
 
@@ -891,6 +910,7 @@ class DeCALogic(ScriptedLoadableModuleLogic):
       targetPoints.InsertNextPoint(point)
 
     # Transform each subject to base
+    transformListGlobal = []
     for meshFileName in os.listdir(meshDirectory):
       if(not meshFileName.startswith(".")):
         lmFileList = os.listdir(lmDirectory)
@@ -917,6 +937,15 @@ class DeCALogic(ScriptedLoadableModuleLogic):
 
             transformNode=slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTransformNode","Rigid")
             transformNode.SetAndObserveTransformToParent(transform)
+            
+            
+            ### EVA ADJUSTMENTS
+            # #transform back to original location
+            #HOW TO SAVE THIS? best as individual files, or as list/array with all the transforms?
+            transformToOrig = transform.getInverse()
+            transformListGlobal.add(transformToOrig)
+            ###
+            
 
             # apply transform to the current surface mesh and landmarks
             currentMeshNode.SetAndObserveTransformNodeID(transformNode.GetID())
@@ -936,6 +965,11 @@ class DeCALogic(ScriptedLoadableModuleLogic):
             slicer.mrmlScene.RemoveNode(currentLMNode)
             slicer.mrmlScene.RemoveNode(currentMeshNode)
             slicer.mrmlScene.RemoveNode(transformNode)
+
+            
+            return transformListGlobal
+            
+
 
   def distanceMatrix(self, a):
     """
@@ -1096,6 +1130,7 @@ class DeCALogic(ScriptedLoadableModuleLogic):
 
     denseCorrespondenceGroup.Update()
     return denseCorrespondenceGroup.GetOutput()
+  
 
   def runCPDRegistration(self,sourceData, targetData, parameters):
     from open3d import geometry
@@ -1237,7 +1272,9 @@ class DeCALogic(ScriptedLoadableModuleLogic):
     polydata_vtk = vtk.vtkPolyData()
     polydata_vtk.SetPoints(points_vtk)
     return polydata_vtk
-
+                                   
+                                   
+                                   
   def computeAverageModelFromGroup(self, denseCorrespondenceGroup, baseIndex):
     sampleNumber = denseCorrespondenceGroup.GetNumberOfBlocks()
     pointNumber = denseCorrespondenceGroup.GetBlock(0).GetNumberOfPoints()
