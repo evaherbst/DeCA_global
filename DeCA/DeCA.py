@@ -380,7 +380,7 @@ class DeCAWidget(ScriptedLoadableModuleWidget):
     self.mirrorMeshDirectory=ctk.ctkPathLineEdit()
     self.mirrorMeshDirectory.filters = ctk.ctkPathLineEdit.Dirs
     self.mirrorMeshDirectory.setToolTip( "Select output directory for mirrored meshes: " )
-    symmetryWidgetLayout.addRow("Ouput mirror mesh directory: ", self.mirrorMeshDirectory)
+    symmetryWidgetLayout.addRow("Output mirror mesh directory: ", self.mirrorMeshDirectory)
 
     #
     # Select aligned landmark directory
@@ -799,7 +799,7 @@ class DeCALogic(ScriptedLoadableModuleLogic):
             slicer.mrmlScene.RemoveNode(rigidTransformNode)
             slicer.mrmlScene.RemoveNode(mirrorLMNode)
 
-  def runDCAlign(self, baseMeshPath, baseLMPath, meshDirectory, landmarkDirectory, outputDirectory, optionCPD, optionErrorOutput, transformListGlobal):
+  def runDCAlign(self, baseMeshPath, baseLMPath, meshDirectory, landmarkDirectory, outputDirectory, optionCPD, optionErrorOutput):
     if optionErrorOutput:
       self.errorCheckPath = os.path.join(outputDirectory, "errorChecking")
       if not os.path.exists(self.errorCheckPath):
@@ -810,31 +810,15 @@ class DeCALogic(ScriptedLoadableModuleLogic):
     #base, modelExt = os.path.splitext(baseMeshPath)
     modelExt=['ply','stl','vtp']
     self.modelNames, models = self.importMeshes(meshDirectory, modelExt)
+    print("model names are  " + str(self.modelNames))
     landmarks = self.importLandmarks(landmarkDirectory)
     self.outputDirectory = outputDirectory
     if not(optionCPD):
-      denseCorrespondenceGroup = self.denseCorrespondenceBaseMesh(landmarks, models, baseMesh, baseLandmarks)
+      denseCorrespondenceGroup = self.denseCorrespondenceBaseMesh(landmarks, models, self.modelNames, baseMesh, baseLandmarks, meshDirectory)
+      print("running dense correspondence base mesh")
     else:
-      denseCorrespondenceGroup = self.denseCorrespondenceCPD(landmarks, models, baseMesh, baseLandmarks)
-
-
-  
-     ### EVA ADJUSTMENTS - TRY REVERTING TO GLOBAL POSITION
-    
-    # get all DeCa outputs
-    sampleNumber = denseCorrespondenceGroup.GetNumberOfBlocks()
-    for i in range(sampleNumber):
-      alignedMesh = denseCorrespondenceGroup.GetBlock(i)
-      #apply inverse transforms
-      #TODO: need to somehow save inverse transforms from runAlign function to list or files, then read, and match with correct meshes
-      # going by index might not work, not sure if order in group is same as initial order before aligning 
-      transformToGlobal = transformListGlobal(i)
-
-       #does this automatically update the meshes in denseCorrespondenceGroup?
-       # it needs to do so so that analysis step is done on updated meshes
-      alignedMesh.setTransform(transformToGlobal)
-
-    ###
+      denseCorrespondenceGroup = self.denseCorrespondenceCPD(landmarks, models, self.modelNames, baseMesh, baseLandmarks, meshDirectory)
+      print("running dense correspondence CPD")
 
     self.addMagnitudeFeature(denseCorrespondenceGroup, self.modelNames, baseMesh)
 
@@ -863,7 +847,7 @@ class DeCALogic(ScriptedLoadableModuleLogic):
       denseCorrespondenceGroupMirror = self.denseCorrespondenceBaseMesh(mirrorLandmarks, mirrorModels, baseMesh, baseLandmarks)
 
     else:
-      denseCorrespondenceGroup = self.denseCorrespondenceCPD(landmarks, models, baseMesh, baseLandmarks)
+      denseCorrespondenceGroup = self.denseCorrespondenceCPD(landmarks, models, self.modelNames, baseMesh, baseLandmarks)
       denseCorrespondenceGroupMirror = self.denseCorrespondenceCPD(mirrorLandmarks, mirrorModels, baseMesh, baseLandmarks)
 
     self.addMagnitudeFeatureSymmetry(denseCorrespondenceGroup, denseCorrespondenceGroupMirror, self.modelNames, baseMesh)
@@ -898,7 +882,7 @@ class DeCALogic(ScriptedLoadableModuleLogic):
     outputLMPath = os.path.join(outputDirectory, outputLMName)
     slicer.util.saveNode(averageLandmarkNode, outputLMPath)
 
-  def runAlign(self, baseMeshPath, baseLMPath, meshDirectory, lmDirectory, ouputMeshDirectory, outputLMDirectory):
+  def runAlign(self, baseMeshPath, baseLMPath, meshDirectory, lmDirectory, outputMeshDirectory, outputLMDirectory):
     targetPoints = vtk.vtkPoints()
     point=[0,0,0]
 
@@ -908,9 +892,15 @@ class DeCALogic(ScriptedLoadableModuleLogic):
     for i in range(baseLMNode.GetNumberOfControlPoints()):
       point = baseLMNode.GetNthControlPointPosition(i)
       targetPoints.InsertNextPoint(point)
+    
+    ### EVA ADJUSTMENTS
+    import json
+
+    # Create an empty dictionary to store transforms
+    transformsToOG = {}
+    ###
 
     # Transform each subject to base
-    transformListGlobal = []
     for meshFileName in os.listdir(meshDirectory):
       if(not meshFileName.startswith(".")):
         lmFileList = os.listdir(lmDirectory)
@@ -937,16 +927,21 @@ class DeCALogic(ScriptedLoadableModuleLogic):
 
             transformNode=slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTransformNode","Rigid")
             transformNode.SetAndObserveTransformToParent(transform)
+
+             ### EVA ADJUSTMENTS - save inverse transforms to rigidly transform objects to original location later on
+            #first create a regular transform
+            regular_transform = vtk.vtkTransform()
+            #set the transform to the matrix of the landmark transform (since we can't get inverse of landmark transform directly)
+            regular_transform.SetMatrix(transform.GetMatrix())
+
+            # Get the inverse of the regular transform
+            transformToOrig = regular_transform.GetInverse()
+            transformName = (subjectID + " transformBack")
+            # Create and add transforms with names to the dictionary
+            transformsToOG[transformName] = transformToOrig
             
-            
-            ### EVA ADJUSTMENTS
-            # #transform back to original location
-            #HOW TO SAVE THIS? best as individual files, or as list/array with all the transforms?
-            transformToOrig = transform.getInverse()
-            transformListGlobal.add(transformToOrig)
             ###
             
-
             # apply transform to the current surface mesh and landmarks
             currentMeshNode.SetAndObserveTransformNodeID(transformNode.GetID())
             currentLMNode.SetAndObserveTransformNodeID(transformNode.GetID())
@@ -955,7 +950,7 @@ class DeCALogic(ScriptedLoadableModuleLogic):
 
             # save output files
             outputMeshName = meshFileName + '_align.ply'
-            outputMeshPath = os.path.join(ouputMeshDirectory, outputMeshName)
+            outputMeshPath = os.path.join(outputMeshDirectory, outputMeshName)
             slicer.util.saveNode(currentMeshNode, outputMeshPath)
             outputLMName = meshFileName + '_align.mrk.json'
             outputLMPath = os.path.join(outputLMDirectory, outputLMName)
@@ -965,10 +960,27 @@ class DeCALogic(ScriptedLoadableModuleLogic):
             slicer.mrmlScene.RemoveNode(currentLMNode)
             slicer.mrmlScene.RemoveNode(currentMeshNode)
             slicer.mrmlScene.RemoveNode(transformNode)
+            
+    ### EVA ADJUSTMENTS
+    print("printing transform dictionary " + str(transformsToOG))
+    # Convert the transforms to serializable dictionaries
+    serialized_transforms = {}
+    for name, transform in transformsToOG.items():
+      matrix = transform.GetMatrix()
+      # Convert the vtkMatrix4x4 to a nested list
+      matrix_list = [[matrix.GetElement(i, j) for j in range(4)] for i in range(4)]
+      serialized_transforms[name] = matrix_list      
+    # Save the serialized transforms to a JSON file
+    outputTName = "transforms.json"
+    outputTPath = os.path.join(outputMeshDirectory, outputTName)
+    try:
+      with open(outputTPath , "w") as file:
+        json.dump(serialized_transforms, file)
+        print("saved transform file")
+    except Exception as e:
+      print("An error occurred while saving the file:", str(e))
 
-            
-            return transformListGlobal
-            
+
 
 
   def distanceMatrix(self, a):
@@ -1095,11 +1107,12 @@ class DeCALogic(ScriptedLoadableModuleLogic):
     denseCorrespondenceGroup.Update()
     return denseCorrespondenceGroup.GetOutput(), baseIndex
 
-  def denseCorrespondenceCPD(self, originalLandmarks, originalMeshes, baseMesh, baseLandmarks, writeErrorOption=False):
+  def denseCorrespondenceCPD(self, originalLandmarks, originalMeshes, modelNames, baseMesh, baseLandmarks, meshDirectory, writeErrorOption=False):
     meanShape, alignedPoints = self.procrustesImposition(originalLandmarks, False)
     sampleNumber = alignedPoints.GetNumberOfBlocks()
     denseCorrespondenceGroup = vtk.vtkMultiBlockDataGroupFilter()
-
+    import json
+    
     # assign parameters for CPD
     parameters = {
       "SpacingTolerance": .04,
@@ -1109,6 +1122,15 @@ class DeCALogic(ScriptedLoadableModuleLogic):
       "beta": 2,
      }
 
+    # Read transforms from the JSON file
+    outputTName = "transforms.json"
+    outputMeshDirectory = meshDirectory
+    print ("looking for transform file in " + meshDirectory)
+    outputTPath = os.path.join(outputMeshDirectory, outputTName)
+    with open("transforms.json", "r") as file:
+        loaded_serialized_transforms = json.load(file)
+
+
     for i in range(sampleNumber):
       correspondingPoints = self.runCPDRegistration(originalMeshes.GetBlock(i), baseMesh, parameters)
       # convert to vtkPoints
@@ -1116,7 +1138,27 @@ class DeCALogic(ScriptedLoadableModuleLogic):
       correspondingMesh.SetPolys(baseMesh.GetPolys())
       # convert to polydata
       denseCorrespondenceGroup.AddInputData(correspondingMesh)
-      # write ouput
+      
+      ### EVA ADJUSTMENTS
+      # Load the saved transforms from the JSON  file 
+
+      # Retrieve transforms based on a specific string in their names
+      search_string = modelNames[i]
+      matching_transform = vtk.vtkTransform()
+      for name, matrix_data in loaded_serialized_transforms.items():
+          if search_string in name:
+              # Convert the nested list back to a vtkMatrix4x4
+              matrix = vtk.vtkMatrix4x4()
+              for i in range(4):
+                  for j in range(4):
+                      matrix.SetElement(i, j, matrix_data[i][j])
+              matching_transform.SetMatrix(matrix)
+              break 
+          print("found matching transform, printing")
+      correspondingMesh.setTransform(matching_transform)
+
+  ####
+      # write output
       if writeErrorOption:
         plyWriterSubject = vtk.vtkPLYWriter()
         plyWriterSubject.SetFileName("/Users/sararolfe/Dropbox/SlicerWorkspace/SMwSML/Data/UBC/DECAOutCPD/" + str(i) + ".ply")
@@ -1130,7 +1172,6 @@ class DeCALogic(ScriptedLoadableModuleLogic):
 
     denseCorrespondenceGroup.Update()
     return denseCorrespondenceGroup.GetOutput()
-  
 
   def runCPDRegistration(self,sourceData, targetData, parameters):
     from open3d import geometry
@@ -1176,7 +1217,16 @@ class DeCALogic(ScriptedLoadableModuleLogic):
     output = DeformableRegistration(**{'X': targetArray, 'Y': sourceArray,'max_iterations': CPDIterations, 'tolerance': CPDTolerence}, alpha = alpha_parameter, beta  = beta_parameter)
     return output
 
-  def denseCorrespondenceBaseMesh(self, originalLandmarks, originalMeshes, baseMesh, baseLandmarks):
+  def denseCorrespondenceBaseMesh(self, originalLandmarks, originalMeshes, modelNames, baseMesh, baseLandmarks, meshDirectory):
+    # Read transforms from the JSON file
+    import json
+    outputTName = "transforms.json"
+    outputMeshDirectory = meshDirectory
+    print ("looking for transform file in " + meshDirectory)
+    outputTPath = os.path.join(outputMeshDirectory, outputTName)
+    with open("transforms.json", "r") as file:
+        loaded_serialized_transforms = json.load(file)
+        
     meanShape, alignedPoints = self.procrustesImposition(originalLandmarks, False)
     sampleNumber = alignedPoints.GetNumberOfBlocks()
     denseCorrespondenceGroup = vtk.vtkMultiBlockDataGroupFilter()
@@ -1185,7 +1235,32 @@ class DeCALogic(ScriptedLoadableModuleLogic):
       originalLandmarks.GetBlock(i).GetPoints(), alignedPoints.GetBlock(i).GetPoints(),
       baseMesh, baseLandmarks, meanShape, i)
       denseCorrespondenceGroup.AddInputData(correspondingMesh)
+      ### EVA ADJUSTMENTS
+      # Load the saved transforms from the JSON  file 
+      # Retrieve transforms based on a specific string in their names
+      search_string = modelNames[i]
+      matching_transform = vtk.vtkTransform()
+      for name, matrix_data in loaded_serialized_transforms.items():
+          if search_string in name:
+              # Convert the nested list back to a vtkMatrix4x4
+              matrix = vtk.vtkMatrix4x4()
+              for i in range(4):
+                  for j in range(4):
+                      matrix.SetElement(i, j, matrix_data[i][j])
+              matching_transform.SetMatrix(matrix)
+              return(matching_transform)
+              break 
+          print("found matching transform, printing")
+    
+      # overwrite original polydata with transformed polydata
+      transform_filter = vtk.vtkTransformPolyDataFilter()
+      transform_filter.SetInputData(correspondingMesh)
+      transform_filter.SetTransform(matching_transform)
+      transform_filter.Update()
 
+    # The original polydata is now overwritten with the transformed data
+      correspondingMesh.DeepCopy(transform_filter.GetOutput())
+      
     denseCorrespondenceGroup.Update()
     return denseCorrespondenceGroup.GetOutput()
 
@@ -1213,7 +1288,7 @@ class DeCALogic(ScriptedLoadableModuleLogic):
     meanTransformBaseFilter.Update()
     meanWarpedBase = meanTransformBaseFilter.GetOutput()
 
-    # write ouput
+    # write output
     if hasattr(self,"errorCheckPath"):
       plyWriterSubject = vtk.vtkPLYWriter()
       print(self.modelNames)
@@ -1272,9 +1347,7 @@ class DeCALogic(ScriptedLoadableModuleLogic):
     polydata_vtk = vtk.vtkPolyData()
     polydata_vtk.SetPoints(points_vtk)
     return polydata_vtk
-                                   
-                                   
-                                   
+
   def computeAverageModelFromGroup(self, denseCorrespondenceGroup, baseIndex):
     sampleNumber = denseCorrespondenceGroup.GetNumberOfBlocks()
     pointNumber = denseCorrespondenceGroup.GetBlock(0).GetNumberOfPoints()
